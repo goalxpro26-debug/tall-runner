@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Giant Dash: Number Gates</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { height:100%; background:#1b1035; overflow:hidden; font-family:'Trebuchet MS','Segoe UI',Verdana,sans-serif; }
+  #wrap { position:relative; width:100%; max-width:480px; height:100%; max-height:900px; margin:0 auto; }
+  @media (min-height:901px){ #wrap{ height:900px; margin-top:calc((100vh - 900px)/2); } }
+  canvas { display:block; width:100%; height:100%; touch-action:none; background:#2a1650; }
+  .btn { position:absolute; left:50%; transform:translateX(-50%); padding:14px 26px; font-size:19px; font-weight:800;
+    color:#fff; background:linear-gradient(180deg,#ff9d2e,#f26722); border:3px solid #fff; border-radius:16px;
+    cursor:pointer; box-shadow:0 4px 0 #a83c00, 0 6px 14px rgba(0,0,0,.45); letter-spacing:.5px; z-index:5; }
+  .btn:active { transform:translateX(-50%) translateY(3px); box-shadow:0 1px 0 #a83c00; }
+  .btn.green { background:linear-gradient(180deg,#4ecb5d,#1f9d34); box-shadow:0 4px 0 #0f6b1d, 0 6px 14px rgba(0,0,0,.45); }
+  .btn.blue { background:linear-gradient(180deg,#4aa8ff,#1d62d8); box-shadow:0 4px 0 #0f3d8f, 0 6px 14px rgba(0,0,0,.45); }
+  .icon-btn { position:absolute; top:10px; width:46px; height:46px; font-size:22px; font-weight:800; color:#fff;
+    background:rgba(20,8,50,.65); border:2px solid rgba(255,255,255,.75); border-radius:12px; cursor:pointer; z-index:6; }
+  #btn-pause { right:10px; }
+  #btn-mute { right:64px; }
+  #btn-start { top:74%; }
+  #btn-next { top:66%; }
+  #btn-retry { top:66%; }
+  #btn-again { top:70%; }
+  #btn-resume { top:58%; }
+  #btn-dash { top:82%; font-size:24px; padding:16px 40px; background:linear-gradient(180deg,#ff5d8f,#d81d5e);
+    box-shadow:0 4px 0 #7d0e36, 0 6px 14px rgba(0,0,0,.45); }
+  .hidden { display:none !important; }
+  #hint { position:absolute; left:0; right:0; bottom:8px; text-align:center; color:rgba(255,255,255,.65);
+    font-size:12px; z-index:4; pointer-events:none; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="480" height="800"></canvas>
+  <button id="btn-pause" class="icon-btn hidden" aria-label="Pause">&#10074;&#10074;</button>
+  <button id="btn-mute" class="icon-btn" aria-label="Mute">&#9834;</button>
+  <button id="btn-start" class="btn green">▶ START DASH</button>
+  <button id="btn-next" class="btn green hidden">NEXT LEVEL ▶</button>
+  <button id="btn-retry" class="btn hidden">↻ TRY AGAIN</button>
+  <button id="btn-again" class="btn green hidden">↻ PLAY AGAIN</button>
+  <button id="btn-resume" class="btn blue hidden">▶ RESUME</button>
+  <button id="btn-dash" class="btn hidden">DASH!</button>
+  <div id="hint">Giant Dash: Number Gates — an original game</div>
+</div>
+<script>
+'use strict';
+/* =====================================================================
+   Giant Dash: Number Gates — an ORIGINAL lane-runner game.
+   Steer Pip, a little sprout-sprinter, through number gates to grow,
+   dodge shrink-gates and spiky rocks, then dash down Grumple the
+   boulder-boss — whose size is set by the level, not by you.
+   All art is drawn procedurally on canvas. All music/SFX are
+   synthesized with WebAudio. No external assets, no network needed.
+   ===================================================================== */
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = 480, H = 800;
+const LANES = [90, 240, 390];          // lane centre x positions
+const PLAYER_Y = 640;                  // player screen y
+const TOTAL_LEVELS = 20;
+const VIEW_DIST = 900;                 // how far ahead rows are visible (dist units)
+
+// ---------- seeded RNG (deterministic per level, so levels are fair) ----------
+function mulberry32(a){ return function(){ a|=0; a=a+0x6D2B79F5|0; let t=Math.imul(a^a>>>15,1|a);
+  t=t+Math.imul(t^t>>>7,61|t)^t; return ((t^t>>>14)>>>0)/4294967296; }; }
+
+// ---------- audio: original synthesized music + SFX ----------
+let AC = null, masterGain = null, musicGain = null, muted = false, musicTimer = null, beat = 0;
+function ensureAudio(){
+  if (AC) { if (AC.state === 'suspended') AC.resume(); return; }
+  try {
+    AC = new (window.AudioContext || window.webkitAudioContext)();
+    masterGain = AC.createGain(); masterGain.gain.value = 0.5; masterGain.connect(AC.destination);
+    musicGain = AC.createGain(); musicGain.gain.value = 0.16; musicGain.connect(masterGain);
+  } catch(e){ AC = null; }
+}
+function tone(freq, dur, type, vol, when, slideTo){
+  if (!AC || muted) return;
+  const t = AC.currentTime + (when || 0);
+  const o = AC.createOscillator(), g = AC.createGain();
+  o.type = type || 'sine'; o.frequency.setValueAtTime(freq, t);
+  if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t + dur);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(vol || 0.25, t + 0.015);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(masterGain); o.start(t); o.stop(t + dur + 0.05);
+}
+function sfx(name){
+  if (!AC || muted) return;
+  if (name === 'good')   { tone(523, .12, 'triangle', .3); tone(659, .12, 'triangle', .3, .07); tone(784, .18, 'triangle', .3, .14); }
+  if (name === 'mult')   { tone(440, .1, 'square', .16); tone(660, .1, 'square', .16, .06); tone(880, .1, 'square', .16, .12); tone(1320, .2, 'square', .16, .18); }
+  if (name === 'bad')    { tone(220, .25, 'sawtooth', .2, 0, 110); }
+  if (name === 'hit')    { tone(160, .3, 'sawtooth', .28, 0, 60); tone(90, .25, 'square', .2, .05, 45); }
+  if (name === 'coin')   { tone(988, .09, 'sine', .25); tone(1319, .16, 'sine', .25, .07); }
+  if (name === 'click')  { tone(700, .06, 'triangle', .2); }
+  if (name === 'dash')   { tone(300, .3, 'sawtooth', .25, 0, 900); }
+  if (name === 'boss')   { tone(98, .5, 'sawtooth', .3, 0, 65); tone(147, .4, 'square', .18, .1, 98); }
+  if (name === 'bounce') { tone(330, .2, 'square', .22, 0, 130); }
+  if (name === 'win')    { [523,659,784,1047,1319].forEach((f,i)=>tone(f,.22,'triangle',.28,i*.11)); }
+  if (name === 'lose')   { [392,330,262,196].forEach((f,i)=>tone(f,.25,'sawtooth',.18,i*.16)); }
+}
+// Original tune: a bouncy 16-step loop in C major pentatonic (my own melody).
+const MELODY = [523,0,659,784, 0,659,523,0, 587,0,698,880, 784,698,659,0];
+const BASS   = [131,0,0,131, 98,0,0,98, 110,0,0,110, 131,0,98,0];
+function startMusic(){
+  ensureAudio(); if (!AC || musicTimer) return;
+  beat = 0;
+  musicTimer = setInterval(()=>{
+    if (muted || !AC) return;
+    const m = MELODY[beat % 16], b = BASS[beat % 16];
+    if (m) tone(m, .22, 'triangle', .5, 0);
+    if (b) { const o=AC.createOscillator(), g=AC.createGain(); const t=AC.currentTime;
+      o.type='sine'; o.frequency.value=b; g.gain.setValueAtTime(.5,t);
+      g.gain.exponentialRampToValueAtTime(.001,t+.24); o.connect(g); g.connect(musicGain);
+      o.start(t); o.stop(t+.26); }
+    beat++;
+  }, 210);
+}
+function stopMusic(){ if (musicTimer){ clearInterval(musicTimer); musicTimer = null; } }
+
+// ---------- game state ----------
+const S = {
+  screen: 'menu',           // menu | playing | boss | clear | gameover | win | paused
+  level: 1, score: 0, lives: 3,
+  size: 10, lane: 1, dist: 0, speed: 0,
+  rows: [], levelLen: 0, bossSize: 0, bossHp: 3, bossY: -160, bossState: 'enter',
+  dashing: 0, invuln: 0, flash: 0, shake: 0,
+  coins: 0, gatesHit: 0, checkpointScore: 0, prevScreen: 'playing',
+  runT: 0, bobPhase: 0, clouds: [], hills: []
+};
+for (let i=0;i<6;i++) S.clouds.push({x:Math.random()*W, y:30+Math.random()*160, s:.6+Math.random()*.9, v:8+Math.random()*14});
+for (let i=0;i<5;i++) S.hills.push({x:i*130, s:60+Math.random()*70});
+
+function bossSizeFor(level){ return 16 + level * 4; }          // L1=20 … L20=96
+function levelLengthFor(level){ return 2400 + level * 220; }    // L1=2620 … L20=6800
+function speedFor(level){ return 300 + level * 16; }            // L1=316 … L20=620
+
+// Build one level's gate/obstacle rows. Every row leaves at least one
+// friendly lane; difficulty rises with level (more rocks, more red gates).
+function buildLevel(level){
+  const rnd = mulberry32(level * 7919 + 13);
+  const rows = [];
+  const len = levelLengthFor(level);
+  const gap = Math.max(150, 205 - level * 3);
+  let d = 520;
+  while (d < len - 260){
+    const cells = [null, null, null];
+    const order = [0,1,2].sort(()=>rnd()-.5);
+    const goodVal = 3 + level + Math.floor(rnd()*7);            // +N gate
+    const badVal  = 2 + Math.floor(level/2) + Math.floor(rnd()*4);
+    const rockChance = Math.min(.55, .18 + level * .02);
+    const redChance  = Math.min(.5, .14 + level * .018);
+    // one guaranteed friendly lane
+    const goodLane = order[0];
+    cells[goodLane] = (rnd() < .22) ? {kind:'mult', label:'×2'} : {kind:'good', val:goodVal, label:'+'+goodVal};
+    for (const lane of order.slice(1)){
+      const r = rnd();
+      if (r < rockChance) cells[lane] = {kind:'rock'};
+      else if (r < rockChance + redChance) cells[lane] = {kind:'bad', val:badVal, label:'−'+badVal};
+      else if (r < rockChance + redChance + .22) cells[lane] = {kind:'coin'};
+      else cells[lane] = null;
+    }
+    // late levels: a second rock is allowed only if a friendly lane remains
+    rows.push({dist:d, cells, done:false});
+    d += gap + rnd()*60;
+  }
+  return rows;
+}
+
+function startLevel(level){
+  S.level = level; S.size = 10; S.lane = 1; S.dist = 0; S.speed = speedFor(level);
+  S.rows = buildLevel(level); S.levelLen = levelLengthFor(level);
+  S.bossSize = bossSizeFor(level); S.bossHp = 3; S.bossY = -180; S.bossState = 'enter';
+  S.dashing = 0; S.invuln = 0; S.flash = 0; S.coins = 0; S.gatesHit = 0;
+  S.checkpointScore = S.score; S.screen = 'playing'; updateButtons();
+}
+function startGame(){
+  ensureAudio(); startMusic(); sfx('click');
+  S.score = 0; S.lives = 3; startLevel(1);
+}
+
+// ---------- input: keyboard / swipe / tap ----------
+function moveLane(dir){
+  if (S.screen !== 'playing' && S.screen !== 'boss') return;
+  const nl = Math.max(0, Math.min(2, S.lane + dir));
+  if (nl !== S.lane){ S.lane = nl; tone(500 + nl*120, .06, 'triangle', .15); }
+}
+let touchX = null, touchY = null;
+canvas.addEventListener('touchstart', e=>{ e.preventDefault(); const t=e.changedTouches[0]; touchX=t.clientX; touchY=t.clientY; }, {passive:false});
+canvas.addEventListener('touchend', e=>{
+  e.preventDefault(); const t=e.changedTouches[0];
+  const dx=t.clientX-touchX, dy=t.clientY-touchY;
+  if (Math.abs(dx) > 28 && Math.abs(dx) > Math.abs(dy)) moveLane(dx>0?1:-1);
+  else if (Math.abs(dy) < 12 && Math.abs(dx) < 12){
+    // tap: left/right third steers, centre dashes in boss phase
+    const r=canvas.getBoundingClientRect(), x=(t.clientX-r.left)/r.width*W;
+    if (S.screen==='boss') doDash();
+    else if (x < W/3) moveLane(-1); else if (x > 2*W/3) moveLane(1);
+  }
+}, {passive:false});
+canvas.addEventListener('mousedown', e=>{
+  const r=canvas.getBoundingClientRect(), x=(e.clientX-r.left)/r.width*W;
+  if (S.screen==='boss') doDash();
+  else if (x < W/3) moveLane(-1); else if (x > 2*W/3) moveLane(1);
+});
+document.addEventListener('keydown', e=>{
+  if (e.key==='ArrowLeft' || e.key==='a' || e.key==='A') moveLane(-1);
+  else if (e.key==='ArrowRight' || e.key==='d' || e.key==='D') moveLane(1);
+  else if (e.key===' ' || e.key==='Enter'){ if (S.screen==='boss') doDash(); e.preventDefault(); }
+  else if (e.key==='p' || e.key==='P' || e.key==='Escape') togglePause();
+  else if (e.key==='m' || e.key==='M') toggleMute();
+});
+
+// ---------- boss fight ----------
+function doDash(){
+  if (S.screen!=='boss' || S.bossState!=='fight' || S.dashing>0) return;
+  S.dashing = 1; sfx('dash');
+  // Dash power is your size. Big enough and the boss goes down a peg.
+  if (S.size >= S.bossSize){
+    S.bossHp--; S.bossSize = Math.max(8, Math.round(S.bossSize * .8));
+    S.shake = 14; sfx('hit');
+    if (S.bossHp <= 0){ levelCleared(); return; }
+  } else {
+    S.lives--; S.shake = 18; sfx('bounce'); S.flash = .35;
+    S.bossSize = Math.max(8, Math.round(S.bossSize * .85));   // boss tires a little
+    S.size = Math.min(60, S.size + 5);                        // pity growth so it stays winnable
+    if (S.lives <= 0){ gameOver(); return; }
+  }
+}
+function levelCleared(){
+  S.score += 200 + S.level * 50 + S.size * 5;
+  sfx('win'); S.screen = 'clear'; updateButtons();
+}
+function gameOver(){
+  sfx('lose'); S.screen = 'gameover'; updateButtons();
+}
+
+// ---------- per-frame update ----------
+let lastT = 0;
+function frame(ts){
+  requestAnimationFrame(frame);
+  // Clamp is generous (0.5s) so game time still tracks real time when the
+  // renderer only delivers a few frames per second (e.g. headless /
+  // software rendering); on a normal 60fps device dt is ~0.016.
+  const dt = Math.min(.5, (ts - lastT)/1000 || 0.016); lastT = ts;
+  if (S.screen === 'playing' || S.screen === 'boss'){
+    S.runT += dt; S.bobPhase += dt * 10;
+    if (S.invuln > 0) S.invuln -= dt;
+    if (S.flash > 0) S.flash -= dt;
+    if (S.shake > 0) S.shake = Math.max(0, S.shake - dt*30);
+    if (S.dashing > 0) S.dashing = Math.max(0, S.dashing - dt*2.2);
+    for (const c of S.clouds){ c.x -= c.v*dt; if (c.x < -70) { c.x = W+60; c.y = 30+Math.random()*160; } }
+  }
+  if (S.screen === 'playing'){
+    S.dist += S.speed * dt;
+    S.score += dt * 2;
+    for (const row of S.rows){
+      if (row.done) continue;
+      if (row.dist <= S.dist){
+        row.done = true;
+        const cell = row.cells[S.lane];
+        if (cell){
+          if (cell.kind === 'good'){ S.size += cell.val; S.gatesHit++; S.score += cell.val*10; sfx('good'); }
+          else if (cell.kind === 'mult'){ S.size *= 2; S.gatesHit++; S.score += 80; sfx('mult'); }
+          else if (cell.kind === 'bad'){ S.size = Math.max(5, S.size - cell.val); S.flash = .25; sfx('bad'); }
+          else if (cell.kind === 'coin'){ S.coins++; S.score += 25; sfx('coin'); }
+          else if (cell.kind === 'rock'){
+            if (S.invuln <= 0){
+              S.lives--; S.size = Math.max(5, S.size - 3); S.invuln = 1.4; S.shake = 16; sfx('hit');
+              if (S.lives <= 0){ gameOver(); }
+            }
+          }
+        }
+      }
+    }
+    if (S.dist >= S.levelLen && S.screen === 'playing'){
+      S.screen = 'boss'; S.bossState = 'enter'; sfx('boss'); updateButtons();
+    }
+  }
+  if (S.screen === 'boss'){
+    if (S.bossState === 'enter'){
+      S.bossY += 260 * dt;
+      if (S.bossY >= 190){ S.bossY = 190; S.bossState = 'fight'; updateButtons(); }
+    }
+  }
+  draw();
+}
+
+// ---------- procedural drawing ----------
+function roundRect(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r);
+  ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+
+function draw(){
+  ctx.save();
+  if (S.shake > 0) ctx.translate((Math.random()-.5)*S.shake, (Math.random()-.5)*S.shake);
+  // sky
+  const sky = ctx.createLinearGradient(0,0,0,H);
+  sky.addColorStop(0,'#3b1d7a'); sky.addColorStop(.55,'#7a3fd1'); sky.addColorStop(1,'#ff9d5c');
+  ctx.fillStyle = sky; ctx.fillRect(-20,-20,W+40,H+40);
+  // sun + clouds
+  ctx.fillStyle = '#ffd94d'; ctx.beginPath(); ctx.arc(400, 92, 34, 0, 7); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,.85)';
+  for (const c of S.clouds){ ctx.beginPath(); ctx.ellipse(c.x, c.y, 34*c.s, 15*c.s, 0, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(c.x+22*c.s, c.y+5*c.s, 24*c.s, 11*c.s, 0, 0, 7); ctx.fill(); }
+  // hills
+  ctx.fillStyle = '#4c2a8f';
+  for (const h of S.hills){ ctx.beginPath(); ctx.ellipse(h.x, 250, 150, h.s, 0, Math.PI, 0); ctx.fill(); }
+  // track
+  ctx.fillStyle = '#5b3a8c'; ctx.fillRect(20, 110, W-40, H-110);
+  ctx.fillStyle = '#6d46a8'; ctx.fillRect(30, 110, W-60, H-110);
+  ctx.strokeStyle = 'rgba(255,255,255,.35)'; ctx.lineWidth = 4; ctx.setLineDash([22,18]);
+  for (const x of [165, 315]){ ctx.beginPath(); ctx.moveTo(x,110); ctx.lineTo(x,H); ctx.stroke(); }
+  ctx.setLineDash([]);
+  ctx.strokeStyle = 'rgba(255,255,255,.6)'; ctx.lineWidth = 5;
+  ctx.strokeRect(20, 110, W-40, H-110);
+
+  if (S.screen === 'playing' || S.screen === 'boss' || S.screen === 'paused'){
+    drawRows();
+    if (S.screen === 'boss') drawBoss();
+    drawPlayer();
+    drawHUD();
+  }
+  if (S.screen === 'menu') drawMenu();
+  if (S.screen === 'clear') drawPanel('LEVEL ' + S.level + ' CLEAR!',
+    ['Size reached: ' + S.size, 'Coins: ' + S.coins + '   Gates: ' + S.gatesHit,
+     'Score: ' + Math.floor(S.score), S.level >= TOTAL_LEVELS ? '' : 'Next: Level ' + (S.level+1)], '#2fae4e');
+  if (S.screen === 'gameover') drawPanel('GAME OVER',
+    ['Pip got squashed on Level ' + S.level + '.', 'Score: ' + Math.floor(S.score),
+     'Tip: steer into green + gates,', 'dodge red − gates and rocks!'], '#d8362a');
+  if (S.screen === 'win') drawPanel('YOU WIN!',
+    ['Pip beat all ' + TOTAL_LEVELS + ' levels', 'and out-grew every boss!',
+     'Final score: ' + Math.floor(S.score), 'Thanks for playing Giant Dash!'], '#f2a007');
+  if (S.screen === 'paused') drawPanel('PAUSED', ['Take a breather, sprinter.', 'P resumes · M mutes'], '#3d6fd8');
+  if (S.flash > 0){ ctx.fillStyle = 'rgba(255,40,40,' + (S.flash*1.4) + ')'; ctx.fillRect(-20,-20,W+40,H+40); }
+  ctx.restore();
+}
+
+function rowY(row){ return 150 + (1 - (row.dist - S.dist)/VIEW_DIST) * (PLAYER_Y - 150); }
+function drawRows(){
+  if (S.screen !== 'playing') return;
+  for (const row of S.rows){
+    if (row.done) continue;
+    const y = rowY(row);
+    if (y < 100 || y > PLAYER_Y + 40) continue;
+    const scale = 0.55 + 0.45 * (y / PLAYER_Y);   // nearer rows look bigger
+    row.cells.forEach((cell, lane)=>{
+      if (!cell) return;
+      const x = LANES[lane];
+      if (cell.kind === 'rock'){
+        const r = 26*scale;
+        ctx.fillStyle = '#5a5f6e';
+        ctx.beginPath();
+        for (let i=0;i<8;i++){ const a=i/8*Math.PI*2 - Math.PI/2, rr=r*(i%2? .72:1.05);
+          const px=x+Math.cos(a)*rr, py=y+Math.sin(a)*rr*.8; i?ctx.lineTo(px,py):ctx.moveTo(px,py); }
+        ctx.closePath(); ctx.fill();
+        ctx.fillStyle = '#2f3340';
+        ctx.beginPath(); ctx.arc(x-r*.25, y-r*.2, r*.16, 0, 7); ctx.arc(x+r*.3, y+r*.15, r*.13, 0, 7); ctx.fill();
+      } else if (cell.kind === 'coin'){
+        const r = 15*scale, bob = Math.sin(S.bobPhase + lane)*3;
+        ctx.fillStyle = '#ffd94d'; ctx.strokeStyle = '#b8860b'; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.arc(x, y+bob, r, 0, 7); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = '#b8860b'; ctx.font = 'bold ' + Math.round(r*1.1) + 'px Trebuchet MS';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('★', x, y+bob+1);
+      } else {
+        // gate arch: two posts + number sign
+        const gw = 78*scale, gh = 86*scale, good = cell.kind==='good', mult = cell.kind==='mult';
+        const col = mult ? '#2fa8ff' : good ? '#37c24a' : '#e23b2e';
+        const dark = mult ? '#0f5fa8' : good ? '#157a24' : '#8f1d12';
+        ctx.fillStyle = dark; ctx.fillRect(x-gw/2-4, y-gh/2, 9, gh); ctx.fillRect(x+gw/2-5, y-gh/2, 9, gh);
+        ctx.fillStyle = col; roundRect(x-gw/2, y-gh/2-14*scale, gw, 34*scale, 8); ctx.fill();
+        ctx.fillStyle = '#fff'; ctx.font = 'bold ' + Math.round(22*scale) + 'px Trebuchet MS';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(cell.label, x, y-gh/2+3*scale);
+        ctx.fillStyle = 'rgba(255,255,255,.25)'; ctx.fillRect(x-gw/2, y+gh/2-8, gw, 8);
+      }
+    });
+  }
+}
+
+function drawPlayer(){
+  const x = LANES[S.lane];
+  // During the boss fight the player steps up the track so the DASH button never covers them.
+  let y = S.screen === 'boss' ? 540 : PLAYER_Y;
+  if (S.dashing > 0) y -= Math.sin(S.dashing * Math.PI) * 190;   // dash lunge upward
+  const bob = Math.sin(S.bobPhase) * 4;
+  const r = Math.min(64, 15 + S.size * 0.55);
+  if (S.invuln > 0 && Math.floor(S.runT*10) % 2 === 0) ctx.globalAlpha = .45;
+  // shadow
+  ctx.fillStyle = 'rgba(0,0,0,.3)'; ctx.beginPath(); ctx.ellipse(x, y + r + 8, r*.9, 9, 0, 0, 7); ctx.fill();
+  // body: round sprout-sprinter, green with a leaf sprout
+  const g = ctx.createRadialGradient(x-r*.3, y-r*.4, r*.2, x, y, r*1.15);
+  g.addColorStop(0, '#8fe388'); g.addColorStop(1, '#2fae4e');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y+bob, r, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#157a24'; ctx.lineWidth = 3; ctx.stroke();
+  // leaf sprout on top
+  ctx.fillStyle = '#37c24a';
+  ctx.beginPath(); ctx.ellipse(x - r*.3, y - r + 4 + bob, r*.42, r*.2, -.6, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(x + r*.3, y - r + 4 + bob, r*.42, r*.2, .6, 0, 7); ctx.fill();
+  // feet
+  const step = Math.sin(S.bobPhase) * r * .3;
+  ctx.fillStyle = '#1d7a30';
+  ctx.beginPath(); ctx.ellipse(x - r*.4, y + r*.85 + bob, r*.28, r*.14, 0, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(x + r*.4, y + r*.85 + bob - step*.4, r*.28, r*.14, 0, 0, 7); ctx.fill();
+  // eyes + smile
+  const er = Math.max(3, r*.16);
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(x - r*.32, y - r*.15 + bob, er*1.25, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(x + r*.32, y - r*.15 + bob, er*1.25, 0, 7); ctx.fill();
+  ctx.fillStyle = '#222';
+  ctx.beginPath(); ctx.arc(x - r*.32 + er*.25, y - r*.15 + bob, er*.6, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(x + r*.32 + er*.25, y - r*.15 + bob, er*.6, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#1d5c1a'; ctx.lineWidth = Math.max(2, r*.07);
+  ctx.beginPath(); ctx.arc(x, y + r*.3 + bob, r*.38, .15*Math.PI, .85*Math.PI); ctx.stroke();
+  // size badge
+  ctx.fillStyle = 'rgba(20,8,50,.75)'; roundRect(x - 30, y + r + 16, 60, 24, 8); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 15px Trebuchet MS'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('SIZE ' + S.size, x, y + r + 29);
+  ctx.globalAlpha = 1;
+}
+
+function drawBoss(){
+  const r = Math.min(150, 30 + S.bossSize * 1.05);
+  const x = W/2, y = S.bossY;
+  ctx.fillStyle = 'rgba(0,0,0,.3)'; ctx.beginPath(); ctx.ellipse(x, y + r + 10, r*.9, 10, 0, 0, 7); ctx.fill();
+  const g = ctx.createRadialGradient(x-r*.3, y-r*.4, r*.2, x, y, r*1.15);
+  g.addColorStop(0, '#b9c0cf'); g.addColorStop(1, '#5a5f6e');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#2f3340'; ctx.lineWidth = 4; ctx.stroke();
+  // rocky cracks
+  ctx.strokeStyle = '#3c404d'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(x-r*.5, y-r*.2); ctx.lineTo(x-r*.2, y); ctx.lineTo(x-r*.45, y+r*.3); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x+r*.4, y-r*.5); ctx.lineTo(x+r*.25, y-r*.1); ctx.stroke();
+  // angry brows + eyes
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(x - r*.32, y - r*.15, r*.2, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(x + r*.32, y - r*.15, r*.2, 0, 7); ctx.fill();
+  ctx.fillStyle = '#c81e1e';
+  ctx.beginPath(); ctx.arc(x - r*.32, y - r*.12, r*.09, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(x + r*.32, y - r*.12, r*.09, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#2f3340'; ctx.lineWidth = r*.09; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(x - r*.55, y - r*.48); ctx.lineTo(x - r*.12, y - r*.28); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x + r*.55, y - r*.48); ctx.lineTo(x + r*.12, y - r*.28); ctx.stroke();
+  // grumpy mouth
+  ctx.strokeStyle = '#2f3340'; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.arc(x, y + r*.55, r*.3, 1.15*Math.PI, 1.85*Math.PI); ctx.stroke();
+  // boss label + HP: label rides below the boss (clamped on-screen while entering)
+  const labelY = Math.max(124, y + r + 62);
+  ctx.fillStyle = 'rgba(20,8,50,.8)'; roundRect(x - 90, labelY - 15, 180, 30, 9); ctx.fill();
+  ctx.fillStyle = '#ffb3c1'; ctx.font = 'bold 15px Trebuchet MS'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('GRUMPLE  •  SIZE ' + S.bossSize, x, labelY);
+  for (let i=0;i<3;i++){ ctx.fillStyle = i < S.bossHp ? '#ff5d6e' : 'rgba(255,255,255,.25)';
+    ctx.beginPath(); ctx.arc(x - 24 + i*24, y + r + 32, 9, 0, 7); ctx.fill(); }
+  if (S.bossState === 'fight'){
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 19px Trebuchet MS'; ctx.textAlign = 'center';
+    ctx.fillText(S.size >= S.bossSize ? 'You are BIGGER — DASH to squash him!'
+      : 'Too small! Dash anyway — he tires and you grow.', W/2, 330);
+  }
+}
+
+function drawHUD(){
+  // top bar
+  ctx.fillStyle = 'rgba(20,8,50,.72)'; roundRect(10, 58, 250, 34, 10); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 16px Trebuchet MS'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText('LEVEL ' + S.level + '/' + TOTAL_LEVELS + '   ★ ' + Math.floor(S.score), 22, 76);
+  // lives (drawn hearts, not emoji)
+  for (let i=0;i<5;i++){
+    const x = 285 + i*26, y = 75;
+    ctx.fillStyle = i < S.lives ? '#ff5d6e' : 'rgba(255,255,255,.22)';
+    ctx.beginPath();
+    ctx.moveTo(x, y+7); ctx.bezierCurveTo(x-11, y-3, x-6, y-11, x, y-4);
+    ctx.bezierCurveTo(x+6, y-11, x+11, y-3, x, y+7); ctx.fill();
+  }
+  // progress bar to boss
+  const prog = S.screen === 'boss' ? 1 : Math.min(1, S.dist / S.levelLen);
+  ctx.fillStyle = 'rgba(20,8,50,.72)'; roundRect(10, 98, W-20, 12, 6); ctx.fill();
+  ctx.fillStyle = prog >= 1 ? '#ff5d6e' : '#4ecb5d'; roundRect(10, 98, (W-20)*prog, 12, 6); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 11px Trebuchet MS'; ctx.textAlign = 'right';
+  ctx.fillText(prog >= 1 ? 'BOSS!' : 'BOSS IN ' + Math.max(0, Math.ceil(S.levelLen - S.dist)) + 'm', W-14, 92);
+  // lane hint arrows during play
+  if (S.screen === 'playing'){
+    ctx.fillStyle = 'rgba(255,255,255,.5)'; ctx.font = 'bold 15px Trebuchet MS'; ctx.textAlign = 'center';
+    ctx.fillText('◀  steer  ▶', W/2, H - 26);
+  }
+}
+
+function drawPanel(title, lines, color){
+  ctx.fillStyle = 'rgba(15,5,40,.72)'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = color; roundRect(40, 210, W-80, 330, 20); ctx.fill();
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 4; ctx.stroke();
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 34px Trebuchet MS'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(title, W/2, 268);
+  ctx.font = '19px Trebuchet MS';
+  lines.forEach((ln, i)=>{ if (ln) ctx.fillText(ln, W/2, 322 + i*32); });
+}
+
+function drawMenu(){
+  ctx.fillStyle = 'rgba(15,5,40,.45)'; ctx.fillRect(0, 0, W, H);
+  // logo: big sprout ball
+  ctx.fillStyle = '#8fe388'; ctx.beginPath(); ctx.arc(W/2, 168, 52, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#157a24'; ctx.lineWidth = 4; ctx.stroke();
+  ctx.fillStyle = '#37c24a';
+  ctx.beginPath(); ctx.ellipse(W/2-16, 112, 22, 10, -.6, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(W/2+16, 112, 22, 10, .6, 0, 7); ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(W/2-18, 160, 11, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(W/2+18, 160, 11, 0, 7); ctx.fill();
+  ctx.fillStyle = '#222';
+  ctx.beginPath(); ctx.arc(W/2-16, 161, 5, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(W/2+20, 161, 5, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#1d5c1a'; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.arc(W/2, 182, 16, .15*Math.PI, .85*Math.PI); ctx.stroke();
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold 42px Trebuchet MS'; ctx.fillText('GIANT DASH', W/2, 268);
+  ctx.font = 'bold 24px Trebuchet MS'; ctx.fillStyle = '#ffd94d'; ctx.fillText('NUMBER GATES', W/2, 302);
+  ctx.fillStyle = '#fff'; ctx.font = '19px Trebuchet MS';
+  const how = ['Steer Pip between 3 lanes: ← → keys,',
+    'swipe, or tap the left / right of the track.',
+    'Green + gates grow you. Blue ×2 doubles you.',
+    'Red − gates shrink you. Rocks cost a life.',
+    'At the end of each level, dash into Grumple:',
+    'bigger than him and he is squashed!',
+    '20 levels — gates get faster and trickier.'];
+  how.forEach((ln, i)=>ctx.fillText(ln, W/2, 352 + i*26));
+  ctx.fillStyle = '#ffd94d'; ctx.font = 'bold 16px Trebuchet MS';
+  ctx.fillText('P = pause   •   M = mute', W/2, 556);
+}
+
+// ---------- buttons / screens ----------
+const $ = id => document.getElementById(id);
+function show(id, on){ $(id).classList.toggle('hidden', !on); }
+function updateButtons(){
+  const s = S.screen;
+  show('btn-start', s === 'menu');
+  show('btn-next', s === 'clear' && S.level < TOTAL_LEVELS);
+  show('btn-again', s === 'clear' && S.level >= TOTAL_LEVELS);
+  show('btn-retry', s === 'gameover');
+  show('btn-resume', s === 'paused');
+  show('btn-dash', s === 'boss' && S.bossState === 'fight');
+  show('btn-pause', s === 'playing' || s === 'boss' || s === 'paused');
+  $('btn-mute').textContent = muted ? '✕' : '♪';
+  if (s === 'win'){ show('btn-again', true); show('btn-next', false); }
+  if (s === 'clear' && S.level >= TOTAL_LEVELS){ S.screen = 'win'; show('btn-next', false); show('btn-again', true); }
+}
+function togglePause(){
+  if (S.screen === 'playing' || S.screen === 'boss'){
+    S.prevScreen = S.screen; S.screen = 'paused'; if (AC) AC.suspend(); updateButtons();
+  } else if (S.screen === 'paused'){
+    S.screen = S.prevScreen; if (AC && !muted) AC.resume(); updateButtons();
+  }
+}
+function toggleMute(){
+  muted = !muted;
+  if (masterGain) masterGain.gain.value = muted ? 0 : 0.5;
+  if (muted && AC) { /* keep context running, gain is 0 */ }
+  updateButtons();
+}
+$('btn-start').addEventListener('click', ()=>{ startGame(); });
+$('btn-next').addEventListener('click', ()=>{ sfx('click'); startLevel(S.level + 1); });
+$('btn-retry').addEventListener('click', ()=>{ sfx('click'); S.score = S.checkpointScore; S.lives = 3; startLevel(S.level); });
+$('btn-again').addEventListener('click', ()=>{ sfx('click'); startGame(); });
+$('btn-resume').addEventListener('click', ()=>{ togglePause(); });
+$('btn-pause').addEventListener('click', ()=>{ togglePause(); });
+$('btn-mute').addEventListener('click', ()=>{ ensureAudio(); toggleMute(); });
+$('btn-dash').addEventListener('click', ()=>{ doDash(); });
+document.addEventListener('visibilitychange', ()=>{ if (document.hidden && (S.screen==='playing'||S.screen==='boss')) togglePause(); });
+
+updateButtons();
+requestAnimationFrame(frame);
+
+// ---------- test hooks (read-only state + debug controls for automated tests) ----------
+window.__giantDash = function(){
+  let nearest = null;
+  if (S.screen === 'playing'){
+    for (const row of S.rows){
+      if (!row.done && row.dist > S.dist){ nearest = {dist: Math.round(row.dist - S.dist), cells: row.cells.map(c=>c?c.kind:null)}; break; }
+    }
+  }
+  return { screen: S.screen, level: S.level, size: S.size, score: Math.floor(S.score),
+    lives: S.lives, lane: S.lane, dist: Math.round(S.dist), levelLen: S.levelLen,
+    bossSize: S.bossSize, bossHp: S.bossHp, bossState: S.bossState, muted,
+    coins: S.coins, gatesHit: S.gatesHit, nearest };
+};
+window.__giantDashDebug = {
+  setSize: v => { S.size = v; },
+  setLives: v => { S.lives = v; },
+  warpToBoss: () => { if (S.screen==='playing'){ S.dist = S.levelLen; } },
+  setLevel: lv => { startLevel(lv); }
+};
+</script>
+</body>
+</html>
